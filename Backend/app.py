@@ -1,81 +1,68 @@
+
 import os
 from flask import Flask, request, jsonify
 from langchain_openai import ChatOpenAI
 from langchain_pinecone import PineconeVectorStore
-from langchain.chains import create_retrieval_chain
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain_core.prompts import ChatPromptTemplate
+from langchain.chains import ConversationalRetrievalChain
+from langchain.memory import ConversationBufferMemory
 from dotenv import load_dotenv
 from src.prompts import *
 from src.helpers import get_embeddings
+from flask_cors import CORS
 
-# Load environment variables from a .env file
+
+# Load environment variables
 load_dotenv()
 
-PINECONE_API_KEY= os.getenv("PINECONE_API_KEY")
-OPENAI_API_KEY= os.getenv("OPENAI_API_KEY")
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-#initiate flask application
+# Initiate Flask app
 app = Flask(__name__)
+CORS(app)
 
-def get_llm():
-    llm_model= ChatOpenAI(
-        openai_api_key= OPENAI_API_KEY,
-        model_name= "gpt-5-nano"
-    ) 
+# LLM model
+llm_model = ChatOpenAI(
+    openai_api_key=OPENAI_API_KEY,
+    model_name="gpt-5-nano"
+)
 
-    return llm_model
+# Pinecone setup
+index_name = "medical-assistant"
+embeddings = get_embeddings()
+vector_store = PineconeVectorStore.from_existing_index(
+    index_name=index_name,
+    embedding=embeddings
+)
+retriever = vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 3})
 
-def get_vectors_store(index, embeddings):
-    vectore_store= PineconeVectorStore.from_existing_index(
-        index_name= index,
-        embedding= embeddings
-    )
+# Buffer Memory setup to memorise past conversations
+memory = ConversationBufferMemory(
+    memory_key="chat_history",
+    return_messages=True
+)
 
-    return vectore_store
+# Conversational RAG chain
+rag_chain = ConversationalRetrievalChain.from_llm(
+    llm=llm_model,
+    retriever=retriever,
+    memory=memory
+)
 
-#LLM pipeline/chain
-def llm_pipeline(llm_model, retriver, query):
-    prompt_template= ChatPromptTemplate.from_messages(
-    [
-        ("system", system_prompt),
-        ("user", "{input}"),
-    ]
-    )
-
-    retrieval_chain= create_stuff_documents_chain(
-    llm= llm_model,
-    prompt= prompt_template
-    )
-
-    rag_chain= create_retrieval_chain(retriver, retrieval_chain)
-
-    
-    response= rag_chain.invoke({"input": query})
-
-    return response["answer"]
-
+# Flask endpoint 
 @app.route('/ask', methods=['POST'])
 def home():
-    data= request.get_json()
-    question= data['question']
+    data = request.get_json()
+    question = data.get('question')
     if not question:
-        return jsonify({"Error": "Please ask question to proceed"}), 400
-    
-    llm_model= get_llm()
+        return jsonify({"Error": "Please ask a question to proceed"}), 400
 
-    index_name= "medical-assistant"
-    embeddings= get_embeddings()
+    result = rag_chain({"question": question})
+    answer = result["answer"]
 
-    vector_store= get_vectors_store(index_name, embeddings)
-
-    retriver= vector_store.as_retriever(search_type="similarity", search_kwargs={"k":3})
-
-    answer= llm_pipeline(llm_model, retriver, question)
-
-    return jsonify({"answer": f"{answer}"}), 200
+    return jsonify({"answer": answer}), 200
 
 
+#Main Function
 if __name__ == '__main__':
     app.run(debug=True)
-
